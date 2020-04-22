@@ -20,6 +20,7 @@ import { CdFormGroup } from '../../../shared/forms/cd-form-group';
 import { AuthStorageService } from '../../../shared/services/auth-storage.service';
 import { NotificationService } from '../../../shared/services/notification.service';
 import { SharedModule } from '../../../shared/shared.module';
+import { PasswordPolicyService } from './../../../shared/services/password-policy.service';
 import { UserFormComponent } from './user-form.component';
 import { UserFormModel } from './user-form.model';
 
@@ -33,7 +34,7 @@ describe('UserFormComponent', () => {
   let router: Router;
   let formHelper: FormHelper;
 
-  const setUrl = (url) => Object.defineProperty(router, 'url', { value: url });
+  const setUrl = (url: string) => Object.defineProperty(router, 'url', { value: url });
 
   @Component({ selector: 'cd-fake', template: '' })
   class FakeComponent {}
@@ -62,6 +63,7 @@ describe('UserFormComponent', () => {
   );
 
   beforeEach(() => {
+    spyOn(TestBed.get(PasswordPolicyService), 'getHelpText').and.callFake(() => of(''));
     fixture = TestBed.createComponent(UserFormComponent);
     component = fixture.componentInstance;
     form = component.userForm;
@@ -110,41 +112,6 @@ describe('UserFormComponent', () => {
       formHelper.expectValidChange('confirmpassword', 'aaa');
     });
 
-    it('should validate password strength very strong', () => {
-      formHelper.setValue('password', 'testpassword#!$!@$');
-      component.checkPassword('testpassword#!$!@$');
-      expect(component.passwordStrengthDescription).toBe('Very strong');
-      expect(component.passwordStrengthLevel).toBe('passwordStrengthLevel4');
-    });
-
-    it('should validate password strength strong', () => {
-      formHelper.setValue('password', 'testpassword0047!@');
-      component.checkPassword('testpassword0047!@');
-      expect(component.passwordStrengthDescription).toBe('Strong');
-      expect(component.passwordStrengthLevel).toBe('passwordStrengthLevel3');
-    });
-
-    it('should validate password strength ok ', () => {
-      formHelper.setValue('password', 'mypassword1!@');
-      component.checkPassword('mypassword1!@');
-      expect(component.passwordStrengthDescription).toBe('OK');
-      expect(component.passwordStrengthLevel).toBe('passwordStrengthLevel2');
-    });
-
-    it('should validate password strength weak', () => {
-      formHelper.setValue('password', 'mypassword1');
-      component.checkPassword('mypassword1');
-      expect(component.passwordStrengthDescription).toBe('Weak');
-      expect(component.passwordStrengthLevel).toBe('passwordStrengthLevel1');
-    });
-
-    it('should validate password strength too weak', () => {
-      formHelper.setValue('password', 'bar0');
-      component.checkPassword('bar0');
-      expect(component.passwordStrengthDescription).toBe('Too weak');
-      expect(component.passwordStrengthLevel).toBe('passwordStrengthLevel0');
-    });
-
     it('should validate email', () => {
       formHelper.expectErrorChange('email', 'aaa', 'email');
     });
@@ -161,7 +128,8 @@ describe('UserFormComponent', () => {
         email: 'user0@email.com',
         roles: ['administrator'],
         enabled: true,
-        pwdExpirationDate: undefined
+        pwdExpirationDate: undefined,
+        pwdUpdateRequired: true
       };
       formHelper.setMultipleValues(user);
       formHelper.setValue('confirmpassword', user.password);
@@ -182,7 +150,8 @@ describe('UserFormComponent', () => {
       email: 'user1@email.com',
       roles: ['administrator'],
       enabled: true,
-      pwdExpirationDate: undefined
+      pwdExpirationDate: undefined,
+      pwdUpdateRequired: true
     };
     const roles = [
       {
@@ -207,18 +176,17 @@ describe('UserFormComponent', () => {
         }
       }
     ];
-    const pwdExpirationSettings = {
-      user_pwd_expiration_warning_1: 10,
-      user_pwd_expiration_warning_2: 5,
-      user_pwd_expiration_span: 90
-    };
 
     beforeEach(() => {
       spyOn(userService, 'get').and.callFake(() => of(user));
       spyOn(TestBed.get(RoleService), 'list').and.callFake(() => of(roles));
       setUrl('/user-management/users/edit/user1');
-      spyOn(TestBed.get(SettingsService), 'pwdExpirationSettings').and.callFake(() =>
-        of(pwdExpirationSettings)
+      spyOn(TestBed.get(SettingsService), 'getStandardSettings').and.callFake(() =>
+        of({
+          user_pwd_expiration_warning_1: 10,
+          user_pwd_expiration_warning_2: 5,
+          user_pwd_expiration_span: 90
+        })
       );
       component.ngOnInit();
       const req = httpTesting.expectOne('api/role');
@@ -279,6 +247,7 @@ describe('UserFormComponent', () => {
       expect(userReq.request.body).toEqual({
         username: 'user1',
         password: '',
+        pwdUpdateRequired: true,
         name: 'User 1',
         email: 'user1@email.com',
         roles: ['administrator'],

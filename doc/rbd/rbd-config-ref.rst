@@ -4,6 +4,25 @@
 
 See `Block Device`_ for additional details.
 
+Generic IO Settings
+===================
+
+``rbd compression hint``
+
+:Description: Hint to send to the OSDs on write operations. If set to `compressible` and the OSD `bluestore compression mode` setting is `passive`, the OSD will attempt to compress the data. If set to `incompressible` and the OSD compression setting is `aggressive`, the OSD will not attempt to compress the data.
+:Type: Enum
+:Required: No
+:Default: ``none``
+:Values: ``none``, ``compressible``, ``incompressible``
+
+``rbd read from replica policy``
+
+:Description: policy for determining which OSD will receive read operations. If set to `default`, the primary OSD will always be used for read operations. If set to `balance`, read operations will be sent to a randomly selected OSD within the replica set. If set to `localize`, read operations will be sent to the closest OSD as determined by the CRUSH map. Note: this feature requires the cluster to be configured with a minimum compatible OSD release of Octopus.
+:Type: Enum
+:Required: No
+:Default: ``default``
+:Values: ``default``, ``balance``, ``localize``
+
 Cache Settings
 =======================
 
@@ -244,6 +263,13 @@ RBD supports advanced features which can be specified via the command line when 
 :Description: Used to restrict older clients from opening an image when it is in migration state.
 :Internal value: 512
 :Added in: v14.0.1 (Nautilus)
+:KRBD support: no
+
+``Non-primary``
+
+:Description: Used to restrict changes to non-primary images using snapshot-based mirroring.
+:Internal value: 1024
+:Added in: v15.2.0 (Octopus)
 :KRBD support: no
 
 

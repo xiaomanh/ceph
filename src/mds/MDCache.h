@@ -19,6 +19,7 @@
 #include <thread>
 
 #include "common/DecayCounter.h"
+#include "include/common_fwd.h"
 #include "include/types.h"
 #include "include/filepath.h"
 #include "include/elist.h"
@@ -60,8 +61,6 @@
 #include "MDSContext.h"
 #include "MDSMap.h"
 #include "Mutation.h"
-
-class PerfCounters;
 
 class MDSRank;
 class Session;
@@ -214,9 +213,7 @@ class MDCache {
     return cache_size() > cache_memory_limit*cache_health_threshold;
   }
 
-  void advance_stray() {
-    stray_index = (stray_index+1)%NUM_STRAY;
-  }
+  void advance_stray();
 
   /**
    * Call this when you know that a CDentry is ready to be passed
@@ -726,6 +723,10 @@ class MDCache {
   void remove_recovered_truncate(CInode *in, LogSegment *ls);
   void start_recovered_truncates();
 
+  // purge unsafe inodes
+  void start_purge_inodes();
+  void purge_inodes(const interval_set<inodeno_t>& i, LogSegment *ls);
+
   CDir *get_auth_container(CDir *in);
   CDir *get_export_container(CDir *dir);
   void find_nested_exports(CDir *dir, set<CDir*>& s);
@@ -757,7 +758,6 @@ class MDCache {
 
   void open_foreign_mdsdir(inodeno_t ino, MDSContext *c);
   CDir *get_stray_dir(CInode *in);
-  CDentry *get_or_create_stray_dentry(CInode *in);
 
   /**
    * Find the given dentry (and whether it exists or not), its ancestors,
@@ -1110,6 +1110,7 @@ class MDCache {
   bool readonly = false;
 
   int stray_index = 0;
+  int stray_fragmenting_index = -1;
 
   set<CInode*> base_inodes;
 

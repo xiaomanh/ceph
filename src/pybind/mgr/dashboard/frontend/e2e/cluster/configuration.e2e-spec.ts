@@ -25,16 +25,15 @@ describe('Configuration page', () => {
   describe('fields check', () => {
     beforeAll(async () => {
       await configuration.navigateTo();
+      await configuration.waitClickableAndClick(configuration.getFirstExpandCollapseElement());
     });
 
     it('should verify that selected footer increases when an entry is clicked', async () => {
-      await configuration.getFirstCell().click();
       const selectedCount = await configuration.getTableSelectedCount();
       await expect(selectedCount).toBe(1);
     });
 
     it('should check that details table opens and tab is correct', async () => {
-      await configuration.getFirstCell().click();
       await expect($('.table.table-striped.table-bordered').isDisplayed());
       await expect(configuration.getTabsCount()).toEqual(1);
       await expect(configuration.getTabText(0)).toEqual('Details');
@@ -42,13 +41,21 @@ describe('Configuration page', () => {
   });
 
   describe('edit configuration test', () => {
+    const configName = 'client_cache_size';
+
     beforeAll(async () => {
       await configuration.navigateTo();
     });
 
-    it('should click and edit a configuration and results should appear in the table', async () => {
-      const configName = 'client_cache_size';
+    beforeEach(async () => {
+      await configuration.clearTableSearchInput();
+    });
 
+    afterAll(async () => {
+      await configuration.configClear(configName);
+    });
+
+    it('should click and edit a configuration and results should appear in the table', async () => {
       await configuration.edit(
         configName,
         ['global', '1'],
@@ -58,7 +65,16 @@ describe('Configuration page', () => {
         ['mds', '5'],
         ['client', '6']
       );
-      await configuration.configClear(configName);
+    });
+
+    it('should show only modified configurations', async () => {
+      await configuration.filterTable('Modified', 'yes');
+      expect(await configuration.getTableFoundCount()).toBe(1);
+    });
+
+    it('should hide all modified configurations', async () => {
+      await configuration.filterTable('Modified', 'no');
+      expect(await configuration.getTableFoundCount()).toBeGreaterThan(1);
     });
   });
 });

@@ -938,9 +938,18 @@ void ObjectWriteOperation::set_alloc_hint(uint64_t expected_object_size,
                                           uint64_t expected_write_size) {
   TestObjectOperationImpl *o = reinterpret_cast<TestObjectOperationImpl*>(impl);
   o->ops.push_back(boost::bind(&TestIoCtxImpl::set_alloc_hint, _1, _2,
-			       expected_object_size, expected_write_size, _4));
+			       expected_object_size, expected_write_size, 0,
+                               _4));
 }
 
+void ObjectWriteOperation::set_alloc_hint2(uint64_t expected_object_size,
+                                           uint64_t expected_write_size,
+                                           uint32_t flags) {
+  TestObjectOperationImpl *o = reinterpret_cast<TestObjectOperationImpl*>(impl);
+  o->ops.push_back(boost::bind(&TestIoCtxImpl::set_alloc_hint, _1, _2,
+			       expected_object_size, expected_write_size, flags,
+                               _4));
+}
 
 void ObjectWriteOperation::tmap_update(const bufferlist& cmdbl) {
   TestObjectOperationImpl *o = reinterpret_cast<TestObjectOperationImpl*>(impl);
@@ -1523,5 +1532,9 @@ int cls_cxx_map_read_header(cls_method_handle_t, bufferlist *) {
 }
 
 uint64_t cls_get_osd_min_alloc_size(cls_method_context_t hctx) {
+  return 0;
+}
+
+uint64_t cls_get_pool_stripe_width(cls_method_context_t hctx) {
   return 0;
 }

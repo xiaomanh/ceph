@@ -25,8 +25,7 @@ class TestMisc(CephFSTestCase):
         # on lookup/open
         self.mount_b.umount_wait()
         self.set_conf('client', 'client debug getattr caps', 'true')
-        self.mount_b.mount()
-        self.mount_b.wait_until_mounted()
+        self.mount_b.mount_wait()
 
         # create a file and hold it open. MDS will issue CEPH_CAP_EXCL_*
         # to mount_a
@@ -47,7 +46,7 @@ class TestMisc(CephFSTestCase):
         t = time.time()
         rctime = self.mount_a.getfattr(".", "ceph.dir.rctime")
         log.info("rctime = {}".format(rctime))
-        self.assertGreaterEqual(rctime, t-10)
+        self.assertGreaterEqual(float(rctime), t - 10)
 
     def test_fs_new(self):
         self.mount_a.umount_wait()
@@ -127,7 +126,7 @@ class TestMisc(CephFSTestCase):
         self.mount_b.wait_for_visible()
 
         # Simulate client death
-        self.mount_a.kill()
+        self.mount_a.suspend_netns()
 
         try:
             # The waiter should get stuck waiting for the capability
@@ -158,10 +157,7 @@ class TestMisc(CephFSTestCase):
                 # We killed it (and possibly its node), so it raises an error
                 pass
         finally:
-            self.mount_a.kill_cleanup()
-
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+            self.mount_a.resume_netns()
 
     def test_filtered_df(self):
         pool_name = self.fs.get_data_pool_name()
@@ -223,10 +219,10 @@ class TestCacheDrop(CephFSTestCase):
         mds_min_caps_per_client = int(self.fs.get_config("mds_min_caps_per_client"))
         self._setup()
         result = self._run_drop_cache_cmd()
-        self.assertTrue(result['client_recall']['return_code'] == 0)
-        self.assertTrue(result['flush_journal']['return_code'] == 0)
+        self.assertEqual(result['client_recall']['return_code'], 0)
+        self.assertEqual(result['flush_journal']['return_code'], 0)
         # It should take at least 1 second
-        self.assertTrue(result['duration'] > 1)
+        self.assertGreater(result['duration'], 1)
         self.assertGreaterEqual(result['trim_cache']['trimmed'], 1000-2*mds_min_caps_per_client)
 
     def test_drop_cache_command_timeout(self):
@@ -237,9 +233,9 @@ class TestCacheDrop(CephFSTestCase):
         """
         self._setup()
         result = self._run_drop_cache_cmd(timeout=10)
-        self.assertTrue(result['client_recall']['return_code'] == -errno.ETIMEDOUT)
-        self.assertTrue(result['flush_journal']['return_code'] == 0)
-        self.assertTrue(result['duration'] > 10)
+        self.assertEqual(result['client_recall']['return_code'], -errno.ETIMEDOUT)
+        self.assertEqual(result['flush_journal']['return_code'], 0)
+        self.assertGreater(result['duration'], 10)
         self.assertGreaterEqual(result['trim_cache']['trimmed'], 100) # we did something, right?
 
     def test_drop_cache_command_dead_timeout(self):
@@ -249,18 +245,21 @@ class TestCacheDrop(CephFSTestCase):
         here.
         """
         self._setup()
-        self.mount_a.kill()
+        self.mount_a.suspend_netns()
         # Note: recall is subject to the timeout. The journal flush will
         # be delayed due to the client being dead.
         result = self._run_drop_cache_cmd(timeout=5)
-        self.assertTrue(result['client_recall']['return_code'] == -errno.ETIMEDOUT)
-        self.assertTrue(result['flush_journal']['return_code'] == 0)
-        self.assertTrue(result['duration'] > 5)
-        self.assertTrue(result['duration'] < 120)
-        self.assertEqual(0, result['trim_cache']['trimmed'])
-        self.mount_a.kill_cleanup()
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.assertEqual(result['client_recall']['return_code'], -errno.ETIMEDOUT)
+        self.assertEqual(result['flush_journal']['return_code'], 0)
+        self.assertGreater(result['duration'], 5)
+        self.assertLess(result['duration'], 120)
+        # Note: result['trim_cache']['trimmed'] may be >0 because dropping the
+        # cache now causes the Locker to drive eviction of stale clients (a
+        # stale session will be autoclosed at mdsmap['session_timeout']). The
+        # particular operation causing this is journal flush which causes the
+        # MDS to wait wait for cap revoke.
+        #self.assertEqual(0, result['trim_cache']['trimmed'])
+        self.mount_a.resume_netns()
 
     def test_drop_cache_command_dead(self):
         """
@@ -269,13 +268,15 @@ class TestCacheDrop(CephFSTestCase):
         here.
         """
         self._setup()
-        self.mount_a.kill()
+        self.mount_a.suspend_netns()
         result = self._run_drop_cache_cmd()
-        self.assertTrue(result['client_recall']['return_code'] == 0)
-        self.assertTrue(result['flush_journal']['return_code'] == 0)
-        self.assertTrue(result['duration'] > 5)
-        self.assertTrue(result['duration'] < 120)
-        self.assertEqual(0, result['trim_cache']['trimmed'])
-        self.mount_a.kill_cleanup()
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.assertEqual(result['client_recall']['return_code'], 0)
+        self.assertEqual(result['flush_journal']['return_code'], 0)
+        self.assertGreater(result['duration'], 5)
+        self.assertLess(result['duration'], 120)
+        # Note: result['trim_cache']['trimmed'] may be >0 because dropping the
+        # cache now causes the Locker to drive eviction of stale clients (a
+        # stale session will be autoclosed at mdsmap['session_timeout']). The
+        # particular operation causing this is journal flush which causes the
+        # MDS to wait wait for cap revoke.
+        self.mount_a.resume_netns()

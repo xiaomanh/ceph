@@ -34,7 +34,7 @@ struct aio_t {
   boost::container::small_vector<iovec,4> iov;
   uint64_t offset, length;
   long rval;
-  bufferlist bl;  ///< write payload (so that it remains stable for duration)
+  ceph::buffer::list bl;  ///< write payload (so that it remains stable for duration)
 
   boost::intrusive::list_member_hook<> queue_item;
 
@@ -94,7 +94,7 @@ typedef boost::intrusive::list<
     &aio_t::queue_item> > aio_list_t;
 
 struct io_queue_t {
-  typedef list<aio_t>::iterator aio_iter;
+  typedef std::list<aio_t>::iterator aio_iter;
 
   virtual ~io_queue_t() {};
 
@@ -105,7 +105,7 @@ struct io_queue_t {
   virtual int get_next_completed(int timeout_ms, aio_t **paio, int max) = 0;
 };
 
-struct aio_queue_t : public io_queue_t {
+struct aio_queue_t final : public io_queue_t {
   int max_iodepth;
 #if defined(HAVE_LIBAIO)
   io_context_t ctx;

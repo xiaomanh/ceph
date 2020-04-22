@@ -2,8 +2,8 @@ import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { Component, Input } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
+import { TreeModule } from 'angular-tree-component';
 import * as _ from 'lodash';
-import { TreeModule } from 'ng2-tree';
 import { TabsModule } from 'ngx-bootstrap/tabs';
 import { ToastrModule } from 'ngx-toastr';
 import { of } from 'rxjs';
@@ -11,7 +11,6 @@ import { of } from 'rxjs';
 import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
 import { CephfsService } from '../../../shared/api/cephfs.service';
 import { ViewCacheStatus } from '../../../shared/enum/view-cache-status.enum';
-import { CdTableSelection } from '../../../shared/models/cd-table-selection';
 import { SharedModule } from '../../../shared/shared.module';
 import { CephfsClientsComponent } from '../cephfs-clients/cephfs-clients.component';
 import { CephfsDetailComponent } from '../cephfs-detail/cephfs-detail.component';
@@ -32,8 +31,8 @@ describe('CephfsTabsComponent', () => {
   };
 
   let old: any;
-  const getReload = () => component['reloadSubscriber'];
-  const setReload = (sth?) => (component['reloadSubscriber'] = sth);
+  const getReload: any = () => component['reloadSubscriber'];
+  const setReload = (sth?: any) => (component['reloadSubscriber'] = sth);
   const mockRunOutside = () => {
     component['subscribeInterval'] = () => {
       // It's mocked because the rxjs timer subscription ins't called through the use of 'tick'.
@@ -49,24 +48,22 @@ describe('CephfsTabsComponent', () => {
     };
   };
 
-  const setSelection = (selection: object[]) => {
-    component.selection.selected = selection;
+  const setSelection = (selection: any) => {
+    component.selection = selection;
     component.ngOnChanges();
   };
 
   const selectFs = (id: number, name: string) => {
-    setSelection([
-      {
-        id,
-        mdsmap: {
-          info: {
-            something: {
-              name
-            }
+    setSelection({
+      id,
+      mdsmap: {
+        info: {
+          something: {
+            name
           }
         }
       }
-    ]);
+    });
   };
 
   const updateData = () => {
@@ -101,7 +98,7 @@ describe('CephfsTabsComponent', () => {
   beforeEach(() => {
     fixture = TestBed.createComponent(CephfsTabsComponent);
     component = fixture.componentInstance;
-    component.selection = new CdTableSelection();
+    component.selection = undefined;
     data = {
       standbys: 'b',
       pools: [{}, {}],
@@ -126,14 +123,12 @@ describe('CephfsTabsComponent', () => {
   });
 
   it('should resist invalid mds info', () => {
-    setSelection([
-      {
-        id: 3,
-        mdsmap: {
-          info: {}
-        }
+    setSelection({
+      id: 3,
+      mdsmap: {
+        info: {}
       }
-    ]);
+    });
     expect(component.grafanaId).toBe(undefined);
   });
 
@@ -143,14 +138,14 @@ describe('CephfsTabsComponent', () => {
   });
 
   it('should set default values on id change before api request', () => {
-    const defaultDetails = {
+    const defaultDetails: Record<string, any> = {
       standbys: '',
       pools: [],
       ranks: [],
       mdsCounters: {},
       name: ''
     };
-    const defaultClients = {
+    const defaultClients: Record<string, any> = {
       data: [],
       status: ViewCacheStatus.ValueNone
     };
@@ -212,7 +207,7 @@ describe('CephfsTabsComponent', () => {
     });
 
     it('should should unsubscribe on deselect', () => {
-      setSelection([]);
+      setSelection(undefined);
       expect(old.unsubscribed).toBe(true);
       expect(getReload()).toBe(undefined); // Cleared timer subscription
     });

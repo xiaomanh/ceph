@@ -31,8 +31,13 @@ namespace librbd { class ImageCtx; }
 namespace rbd {
 namespace mirror {
 
+template <typename> class RemotePoolPoller;
+namespace remote_pool_poller { struct Listener; }
+
+struct PoolMetaCache;
 template <typename> class ServiceDaemon;
 template <typename> struct Threads;
+
 
 /**
  * Controls mirroring for a single remote cluster.
@@ -43,6 +48,7 @@ public:
   PoolReplayer(Threads<ImageCtxT> *threads,
                ServiceDaemon<ImageCtxT> *service_daemon,
                journal::CacheManagerHandler *cache_manager_handler,
+               PoolMetaCache* pool_meta_cache,
 	       int64_t local_pool_id, const PeerSpec &peer,
 	       const std::vector<const char*> &args);
   ~PoolReplayer();
@@ -90,6 +96,8 @@ private:
    *
    * @endverbatim
    */
+
+  struct RemotePoolPollerListener;
 
   int init_rados(const std::string &cluster_name,
                  const std::string &client_name,
@@ -182,9 +190,12 @@ private:
     m_threads->work_queue->queue(on_lock);
   }
 
+  void handle_remote_pool_meta_updated(const RemotePoolMeta& remote_pool_meta);
+
   Threads<ImageCtxT> *m_threads;
   ServiceDaemon<ImageCtxT> *m_service_daemon;
   journal::CacheManagerHandler *m_cache_manager_handler;
+  PoolMetaCache* m_pool_meta_cache;
   int64_t m_local_pool_id = -1;
   PeerSpec m_peer;
   std::vector<const char*> m_args;
@@ -203,6 +214,10 @@ private:
   librados::IoCtx m_remote_io_ctx;
 
   std::string m_local_mirror_uuid;
+
+  RemotePoolMeta m_remote_pool_meta;
+  std::unique_ptr<remote_pool_poller::Listener> m_remote_pool_poller_listener;
+  std::unique_ptr<RemotePoolPoller<ImageCtxT>> m_remote_pool_poller;
 
   std::unique_ptr<NamespaceReplayer<ImageCtxT>> m_default_namespace_replayer;
   std::map<std::string, NamespaceReplayer<ImageCtxT> *> m_namespace_replayers;

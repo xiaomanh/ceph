@@ -19,6 +19,7 @@
 #include "tools/rbd_mirror/image_replayer/Utils.h"
 #include "tools/rbd_mirror/image_replayer/journal/EventPreprocessor.h"
 #include "tools/rbd_mirror/image_replayer/journal/ReplayStatusFormatter.h"
+#include "tools/rbd_mirror/image_replayer/journal/StateBuilder.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rbd_mirror
@@ -75,22 +76,6 @@ struct Replayer<I>::C_ReplayCommitted : public Context {
 };
 
 template <typename I>
-struct Replayer<I>::C_TrackedOp : public Context {
-  Replayer *replayer;
-  Context* ctx;
-
-  C_TrackedOp(Replayer* replayer, Context* ctx)
-    : replayer(replayer), ctx(ctx) {
-    replayer->m_in_flight_op_tracker.start_op();
-  }
-
-  void finish(int r) override {
-    ctx->complete(r);
-    replayer->m_in_flight_op_tracker.finish_op();
-  }
-};
-
-template <typename I>
 struct Replayer<I>::RemoteJournalerListener
   : public ::journal::JournalMetadataListener {
   Replayer* replayer;
@@ -98,9 +83,11 @@ struct Replayer<I>::RemoteJournalerListener
   RemoteJournalerListener(Replayer* replayer) : replayer(replayer) {}
 
   void handle_update(::journal::JournalMetadata*) override {
-    auto ctx = new C_TrackedOp(replayer, new LambdaContext([this](int r) {
-      replayer->handle_remote_journal_metadata_updated();
-    }));
+    auto ctx = new C_TrackedOp(
+      replayer->m_in_flight_op_tracker,
+      new LambdaContext([this](int r) {
+        replayer->handle_remote_journal_metadata_updated();
+      }));
     replayer->m_threads->work_queue->queue(ctx, 0);
   }
 };
@@ -150,15 +137,14 @@ struct Replayer<I>::LocalJournalListener
 
 template <typename I>
 Replayer<I>::Replayer(
-    I** local_image_ctx, Journaler* remote_journaler,
-    const std::string& local_mirror_uuid, const std::string& remote_mirror_uuid,
-    ReplayerListener* replayer_listener, Threads<I>* threads)
-  : m_local_image_ctx(local_image_ctx),
-    m_remote_journaler(remote_journaler),
+    Threads<I>* threads,
+    const std::string& local_mirror_uuid,
+    StateBuilder<I>* state_builder,
+    ReplayerListener* replayer_listener)
+  : m_threads(threads),
     m_local_mirror_uuid(local_mirror_uuid),
-    m_remote_mirror_uuid(remote_mirror_uuid),
+    m_state_builder(state_builder),
     m_replayer_listener(replayer_listener),
-    m_threads(threads),
     m_lock(ceph::make_mutex(librbd::util::unique_lock_name(
       "rbd::mirror::image_replayer::journal::Replayer", this))) {
   dout(10) << dendl;
@@ -186,7 +172,7 @@ Replayer<I>::~Replayer() {
   ceph_assert(m_replay_status_formatter == nullptr);
   ceph_assert(m_delayed_preprocess_task == nullptr);
   ceph_assert(m_flush_local_replay_task == nullptr);
-  ceph_assert(*m_local_image_ctx == nullptr);
+  ceph_assert(m_state_builder->local_image_ctx == nullptr);
 }
 
 template <typename I>
@@ -195,7 +181,7 @@ void Replayer<I>::init(Context* on_finish) {
 
   ceph_assert(m_local_journal == nullptr);
   {
-    auto local_image_ctx = *m_local_image_ctx;
+    auto local_image_ctx = m_state_builder->local_image_ctx;
     std::shared_lock image_locker{local_image_ctx->image_lock};
     m_image_spec = util::compute_image_spec(local_image_ctx->md_ctx,
                                             local_image_ctx->name);
@@ -208,7 +194,7 @@ void Replayer<I>::init(Context* on_finish) {
   if (m_local_journal == nullptr) {
     std::unique_lock locker{m_lock};
     m_state = STATE_COMPLETE;
-    m_remote_journaler = nullptr;
+    m_state_builder->remote_journaler = nullptr;
 
     handle_replay_complete(locker, -EINVAL, "error accessing local journal");
     close_local_image();
@@ -247,7 +233,7 @@ template <typename I>
 void Replayer<I>::flush(Context* on_finish) {
   dout(10) << dendl;
 
-  flush_local_replay(new C_TrackedOp(this, on_finish));
+  flush_local_replay(new C_TrackedOp(m_in_flight_op_tracker, on_finish));
 }
 
 template <typename I>
@@ -264,7 +250,7 @@ bool Replayer<I>::get_replay_status(std::string* description,
     return false;
   }
 
-  on_finish = new C_TrackedOp(this, on_finish);
+  on_finish = new C_TrackedOp(m_in_flight_op_tracker, on_finish);
   return m_replay_status_formatter->get_or_send_update(description,
                                                        on_finish);
 }
@@ -275,7 +261,7 @@ void Replayer<I>::init_remote_journaler() {
 
   Context *ctx = create_context_callback<
     Replayer, &Replayer<I>::handle_init_remote_journaler>(this);
-  m_remote_journaler->init(ctx);
+  m_state_builder->remote_journaler->init(ctx);
 }
 
 template <typename I>
@@ -293,11 +279,11 @@ void Replayer<I>::handle_init_remote_journaler(int r) {
   // listen for metadata updates to check for disconnect events
   ceph_assert(m_remote_listener == nullptr);
   m_remote_listener = new RemoteJournalerListener(this);
-  m_remote_journaler->add_listener(m_remote_listener);
+  m_state_builder->remote_journaler->add_listener(m_remote_listener);
 
   cls::journal::Client remote_client;
-  r = m_remote_journaler->get_cached_client(m_local_mirror_uuid,
-                                            &remote_client);
+  r = m_state_builder->remote_journaler->get_cached_client(m_local_mirror_uuid,
+                                                           &remote_client);
   if (r < 0) {
     derr << "error retrieving remote journal client: " << cpp_strerror(r)
          << dendl;
@@ -307,7 +293,8 @@ void Replayer<I>::handle_init_remote_journaler(int r) {
   }
 
   std::string error;
-  r = validate_remote_client_state(remote_client, &m_remote_client_meta,
+  r = validate_remote_client_state(remote_client,
+                                   &m_state_builder->remote_client_meta,
                                    &m_resync_requested, &error);
   if (r < 0) {
     handle_replay_complete(locker, r, error);
@@ -335,7 +322,8 @@ void Replayer<I>::handle_start_external_replay(int r) {
   if (r < 0) {
     ceph_assert(m_local_journal_replay == nullptr);
     derr << "error starting external replay on local image "
-         <<  (*m_local_image_ctx)->id << ": " << cpp_strerror(r) << dendl;
+         << m_state_builder->local_image_ctx->id << ": "
+         << cpp_strerror(r) << dendl;
 
     handle_replay_complete(locker, r, "error starting replay on local image");
     close_local_image();
@@ -375,16 +363,18 @@ void Replayer<I>::handle_start_external_replay(int r) {
 
   // start remote journal replay
   m_event_preprocessor = EventPreprocessor<I>::create(
-    **m_local_image_ctx, *m_remote_journaler, m_local_mirror_uuid,
-    &m_remote_client_meta, m_threads->work_queue);
+    *m_state_builder->local_image_ctx, *m_state_builder->remote_journaler,
+    m_local_mirror_uuid, &m_state_builder->remote_client_meta,
+    m_threads->work_queue);
   m_replay_status_formatter = ReplayStatusFormatter<I>::create(
-    m_remote_journaler, m_local_mirror_uuid);
+    m_state_builder->remote_journaler, m_local_mirror_uuid);
 
-  auto cct = static_cast<CephContext *>((*m_local_image_ctx)->cct);
+  auto cct = static_cast<CephContext *>(m_state_builder->local_image_ctx->cct);
   double poll_seconds = cct->_conf.get_val<double>(
     "rbd_mirror_journal_poll_age");
   m_remote_replay_handler = new RemoteReplayHandler(this);
-  m_remote_journaler->start_live_replay(m_remote_replay_handler, poll_seconds);
+  m_state_builder->remote_journaler->start_live_replay(m_remote_replay_handler,
+                                                       poll_seconds);
 
   notify_status_updated();
 }
@@ -464,6 +454,10 @@ void Replayer<I>::handle_wait_for_event_replay(int r) {
 template <typename I>
 void Replayer<I>::close_local_image() {
   ceph_assert(ceph_mutex_is_locked_by_me(m_lock));
+  if (m_state_builder->local_image_ctx == nullptr) {
+    stop_remote_journaler_replay();
+    return;
+  }
 
   dout(10) << dendl;
   if (m_local_journal_listener != nullptr) {
@@ -489,10 +483,11 @@ void Replayer<I>::close_local_image() {
   // NOTE: it's important to ensure that the local image is fully
   // closed before attempting to close the remote journal in
   // case the remote cluster is unreachable
+  ceph_assert(m_state_builder->local_image_ctx != nullptr);
   auto ctx = create_context_callback<
     Replayer<I>, &Replayer<I>::handle_close_local_image>(this);
   auto request = image_replayer::CloseImageRequest<I>::create(
-    m_local_image_ctx, ctx);
+    &m_state_builder->local_image_ctx, ctx);
   request->send();
 }
 
@@ -507,7 +502,7 @@ void Replayer<I>::handle_close_local_image(int r) {
     handle_replay_error(r, "failed to close local image");
   }
 
-  ceph_assert(*m_local_image_ctx == nullptr);
+  ceph_assert(m_state_builder->local_image_ctx == nullptr);
   stop_remote_journaler_replay();
 }
 
@@ -515,11 +510,11 @@ template <typename I>
 void Replayer<I>::stop_remote_journaler_replay() {
   ceph_assert(ceph_mutex_is_locked_by_me(m_lock));
 
-  if (m_remote_journaler == nullptr) {
+  if (m_state_builder->remote_journaler == nullptr) {
     wait_for_in_flight_ops();
     return;
   } else if (m_remote_replay_handler == nullptr) {
-    shut_down_remote_journaler();
+    wait_for_in_flight_ops();
     return;
   }
 
@@ -527,7 +522,7 @@ void Replayer<I>::stop_remote_journaler_replay() {
   auto ctx = create_async_context_callback(
     m_threads->work_queue, create_context_callback<
       Replayer<I>, &Replayer<I>::handle_stop_remote_journaler_replay>(this));
-  m_remote_journaler->stop_replay(ctx);
+  m_state_builder->remote_journaler->stop_replay(ctx);
 }
 
 template <typename I>
@@ -544,44 +539,17 @@ void Replayer<I>::handle_stop_remote_journaler_replay(int r) {
   delete m_remote_replay_handler;
   m_remote_replay_handler = nullptr;
 
-  shut_down_remote_journaler();
-}
-
-template <typename I>
-void Replayer<I>::shut_down_remote_journaler() {
-  ceph_assert(ceph_mutex_is_locked_by_me(m_lock));
-
-  dout(10) << dendl;
-  if (m_remote_listener != nullptr) {
-    m_remote_journaler->remove_listener(m_remote_listener);
-    delete m_remote_listener;
-    m_remote_listener = nullptr;
-  }
-
-  auto ctx = create_context_callback<
-    Replayer, &Replayer<I>::handle_shut_down_remote_journaler>(this);
-  m_remote_journaler->shut_down(ctx);
-}
-
-template <typename I>
-void Replayer<I>::handle_shut_down_remote_journaler(int r) {
-  dout(10) << "r=" << r << dendl;
-  if (r < 0) {
-    derr << "failed to shut down remote journaler: " << cpp_strerror(r)
-         << dendl;
-
-    std::unique_lock locker{m_lock};
-    handle_replay_error(r, "failed to shut down remote journaler");
-  }
-
-  m_remote_journaler = nullptr;
-
   wait_for_in_flight_ops();
 }
 
 template <typename I>
 void Replayer<I>::wait_for_in_flight_ops() {
   dout(10) << dendl;
+  if (m_remote_listener != nullptr) {
+    m_state_builder->remote_journaler->remove_listener(m_remote_listener);
+    delete m_remote_listener;
+    m_remote_listener = nullptr;
+  }
 
   auto ctx = create_async_context_callback(
     m_threads->work_queue, create_context_callback<
@@ -616,8 +584,8 @@ void Replayer<I>::handle_remote_journal_metadata_updated() {
   }
 
   cls::journal::Client remote_client;
-  int r = m_remote_journaler->get_cached_client(m_local_mirror_uuid,
-                                                &remote_client);
+  int r = m_state_builder->remote_journaler->get_cached_client(
+    m_local_mirror_uuid, &remote_client);
   if (r < 0) {
     derr << "failed to retrieve client: " << cpp_strerror(r) << dendl;
     return;
@@ -729,7 +697,7 @@ void Replayer<I>::flush_commit_position(Context* on_flush) {
     [this, on_flush](int r) {
       handle_flush_commit_position(on_flush, r);
     });
-  m_remote_journaler->flush_commit_position(ctx);
+  m_state_builder->remote_journaler->flush_commit_position(ctx);
 }
 
 template <typename I>
@@ -807,7 +775,8 @@ void Replayer<I>::handle_replay_ready(
     return;
   }
 
-  if (!m_remote_journaler->try_pop_front(&m_replay_entry, &m_replay_tag_tid)) {
+  if (!m_state_builder->remote_journaler->try_pop_front(&m_replay_entry,
+                                                        &m_replay_tag_tid)) {
     dout(20) << "no entries ready for replay" << dendl;
     return;
   }
@@ -881,7 +850,8 @@ void Replayer<I>::get_remote_tag() {
 
   Context *ctx = create_context_callback<
     Replayer, &Replayer<I>::handle_get_remote_tag>(this);
-  m_remote_journaler->get_tag(m_replay_tag_tid, &m_replay_tag, ctx);
+  m_state_builder->remote_journaler->get_tag(m_replay_tag_tid, &m_replay_tag,
+                                             ctx);
 }
 
 template <typename I>
@@ -918,7 +888,7 @@ void Replayer<I>::allocate_local_tag() {
 
   std::string mirror_uuid = m_replay_tag_data.mirror_uuid;
   if (mirror_uuid == librbd::Journal<>::LOCAL_MIRROR_UUID) {
-    mirror_uuid = m_remote_mirror_uuid;
+    mirror_uuid = m_state_builder->remote_mirror_uuid;
   } else if (mirror_uuid == m_local_mirror_uuid) {
     mirror_uuid = librbd::Journal<>::LOCAL_MIRROR_UUID;
   } else if (mirror_uuid == librbd::Journal<>::ORPHAN_MIRROR_UUID) {
@@ -942,7 +912,7 @@ void Replayer<I>::allocate_local_tag() {
 
   librbd::journal::TagPredecessor predecessor(m_replay_tag_data.predecessor);
   if (predecessor.mirror_uuid == librbd::Journal<>::LOCAL_MIRROR_UUID) {
-    predecessor.mirror_uuid = m_remote_mirror_uuid;
+    predecessor.mirror_uuid = m_state_builder->remote_mirror_uuid;
   } else if (predecessor.mirror_uuid == m_local_mirror_uuid) {
     predecessor.mirror_uuid = librbd::Journal<>::LOCAL_MIRROR_UUID;
   }
@@ -986,7 +956,8 @@ void Replayer<I>::preprocess_entry() {
 
   m_replay_bytes = data.length();
   uint32_t delay = calculate_replay_delay(
-    m_event_entry.timestamp, (*m_local_image_ctx)->mirroring_replay_delay);
+    m_event_entry.timestamp,
+    m_state_builder->local_image_ctx->mirroring_replay_delay);
   if (delay == 0) {
     handle_preprocess_entry_ready(0);
     return;
@@ -1076,7 +1047,7 @@ void Replayer<I>::handle_process_entry_ready(int r) {
 
   bool update_status = false;
   {
-    auto local_image_ctx = *m_local_image_ctx;
+    auto local_image_ctx = m_state_builder->local_image_ctx;
     std::shared_lock image_locker{local_image_ctx->image_lock};
     auto image_spec = util::compute_image_spec(local_image_ctx->md_ctx,
                                                local_image_ctx->name);
@@ -1085,6 +1056,8 @@ void Replayer<I>::handle_process_entry_ready(int r) {
       update_status = true;
     }
   }
+
+  m_replay_status_formatter->handle_entry_processed(m_replay_bytes);
 
   if (update_status) {
     unregister_perf_counters();
@@ -1107,8 +1080,8 @@ void Replayer<I>::handle_process_entry_safe(
     derr << "failed to commit journal event: " << cpp_strerror(r) << dendl;
     handle_replay_complete(r, "failed to commit journal event");
   } else {
-    ceph_assert(m_remote_journaler != nullptr);
-    m_remote_journaler->committed(replay_entry);
+    ceph_assert(m_state_builder->remote_journaler != nullptr);
+    m_state_builder->remote_journaler->committed(replay_entry);
   }
 
   auto latency = ceph_clock_now() - replay_start_time;
@@ -1149,7 +1122,7 @@ void Replayer<I>::notify_status_updated() {
 
   dout(10) << dendl;
 
-  auto ctx = new C_TrackedOp(this, new LambdaContext(
+  auto ctx = new C_TrackedOp(m_in_flight_op_tracker, new LambdaContext(
     [this](int) {
       m_replayer_listener->handle_notification();
     }));
@@ -1191,7 +1164,7 @@ int Replayer<I>::validate_remote_client_state(
     return -EBADMSG;
   }
 
-  auto local_image_ctx = *m_local_image_ctx;
+  auto local_image_ctx = m_state_builder->local_image_ctx;
   dout(5) << "image_id=" << local_image_ctx->id << ", "
           << "remote_client_meta.image_id="
           << remote_client_meta->image_id << ", "
@@ -1222,7 +1195,7 @@ void Replayer<I>::register_perf_counters() {
   ceph_assert(ceph_mutex_is_locked_by_me(m_lock));
   ceph_assert(m_perf_counters == nullptr);
 
-  auto cct = static_cast<CephContext *>((*m_local_image_ctx)->cct);
+  auto cct = static_cast<CephContext *>(m_state_builder->local_image_ctx->cct);
   auto prio = cct->_conf.get_val<int64_t>("rbd_mirror_image_perf_stats_prio");
   PerfCountersBuilder plb(g_ceph_context, "rbd_mirror_image_" + m_image_spec,
                           l_rbd_mirror_first, l_rbd_mirror_last);

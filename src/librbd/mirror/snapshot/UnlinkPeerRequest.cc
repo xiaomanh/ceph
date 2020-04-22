@@ -61,42 +61,55 @@ void UnlinkPeerRequest<I>::unlink_peer() {
   CephContext *cct = m_image_ctx->cct;
 
   m_image_ctx->image_lock.lock_shared();
+  int r = -ENOENT;
+  cls::rbd::MirrorSnapshotNamespace* mirror_ns = nullptr;
+  bool newer_mirror_snapshots = false;
+  for (auto snap_it = m_image_ctx->snap_info.find(m_snap_id);
+       snap_it != m_image_ctx->snap_info.end(); ++snap_it) {
+    if (snap_it->first == m_snap_id) {
+      r = 0;
+      mirror_ns = boost::get<cls::rbd::MirrorSnapshotNamespace>(
+        &snap_it->second.snap_namespace);
+    } else if (boost::get<cls::rbd::MirrorSnapshotNamespace>(
+                 &snap_it->second.snap_namespace) != nullptr) {
+      ldout(cct, 20) << "located newer mirror snapshot" << dendl;
+      newer_mirror_snapshots = true;
+      break;
+    }
+  }
 
-  auto snap_info = m_image_ctx->get_snap_info(m_snap_id);
-  if (!snap_info) {
+  if (r == -ENOENT) {
+    ldout(cct, 20) << "missing snapshot: snap_id=" << m_snap_id << dendl;
     m_image_ctx->image_lock.unlock_shared();
-    finish(-ENOENT);
+    finish(r);
     return;
   }
 
-  auto info = boost::get<cls::rbd::MirrorPrimarySnapshotNamespace>(
-    &snap_info->snap_namespace);
-  if (info == nullptr) {
-    lderr(cct) << "not mirror primary snapshot (snap_id=" << m_snap_id << ")"
-               << dendl;
+  if (mirror_ns == nullptr) {
+    lderr(cct) << "not mirror snapshot (snap_id=" << m_snap_id << ")" << dendl;
     m_image_ctx->image_lock.unlock_shared();
     finish(-EINVAL);
     return;
   }
 
-  if (info->mirror_peer_uuids.count(m_mirror_peer_uuid) == 0 ||
-      info->mirror_peer_uuids.size() == 1U) {
+  // if there is or will be no more peers in the mirror snapshot and we have
+  // a more recent mirror snapshot, remove the older one
+  if ((mirror_ns->mirror_peer_uuids.count(m_mirror_peer_uuid) == 0) ||
+      (mirror_ns->mirror_peer_uuids.size() == 1U && newer_mirror_snapshots)) {
     m_image_ctx->image_lock.unlock_shared();
     remove_snapshot();
     return;
   }
-
   m_image_ctx->image_lock.unlock_shared();
 
-  ldout(cct, 20) << dendl;
-
+  ldout(cct, 20) << "snap_id=" << m_snap_id << ", "
+                 << "mirror_peer_uuid=" << m_mirror_peer_uuid << dendl;
   librados::ObjectWriteOperation op;
   librbd::cls_client::mirror_image_snapshot_unlink_peer(&op, m_snap_id,
                                                         m_mirror_peer_uuid);
   auto aio_comp = create_rados_callback<
     UnlinkPeerRequest<I>, &UnlinkPeerRequest<I>::handle_unlink_peer>(this);
-  int r = m_image_ctx->md_ctx.aio_operate(m_image_ctx->header_oid, aio_comp,
-                                          &op);
+  r = m_image_ctx->md_ctx.aio_operate(m_image_ctx->header_oid, aio_comp, &op);
   ceph_assert(r == 0);
   aio_comp->release();
 }
@@ -164,17 +177,22 @@ void UnlinkPeerRequest<I>::remove_snapshot() {
     }
   }
 
-  if (r == ENOENT) {
+  if (r == -ENOENT) {
+    ldout(cct, 20) << "failed to locate snapshot " << m_snap_id << dendl;
     finish(0);
     return;
   }
 
-  auto info = boost::get<cls::rbd::MirrorPrimarySnapshotNamespace>(
+  auto info = boost::get<cls::rbd::MirrorSnapshotNamespace>(
     &snap_namespace);
   ceph_assert(info);
 
   if (info->mirror_peer_uuids.size() > 1 ||
       info->mirror_peer_uuids.count(m_mirror_peer_uuid) == 0) {
+    ldout(cct, 20) << "skipping removal of snapshot: "
+                   << "snap_id=" << m_snap_id << ": "
+                   << "mirror_peer_uuid=" << m_mirror_peer_uuid << ", "
+                   << "mirror_peer_uuids=" << info->mirror_peer_uuids << dendl;
     finish(0);
     return;
   }

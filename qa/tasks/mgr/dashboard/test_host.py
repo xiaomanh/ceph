@@ -17,7 +17,7 @@ class HostControllerTest(DashboardTestCase):
         super(HostControllerTest, cls).setUpClass()
         cls._load_module("test_orchestrator")
 
-        cmd = ['orchestrator', 'set', 'backend', 'test_orchestrator']
+        cmd = ['orch', 'set', 'backend', 'test_orchestrator']
         cls.mgr_cluster.mon_manager.raw_cluster_cmd(*cmd)
 
         cmd = ['test_orchestrator', 'load_data', '-i', '-']
@@ -89,3 +89,17 @@ class HostControllerTest(DashboardTestCase):
                 'path': str
             }))
         })))
+
+
+class HostControllerNoOrchestratorTest(DashboardTestCase):
+    def test_host_create(self):
+        self._post('/api/host?hostname=foo')
+        self.assertStatus(503)
+        self.assertError(code='orchestrator_status_unavailable',
+                         component='orchestrator')
+
+    def test_host_delete(self):
+        self._delete('/api/host/bar')
+        self.assertStatus(503)
+        self.assertError(code='orchestrator_status_unavailable',
+                         component='orchestrator')

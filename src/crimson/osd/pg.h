@@ -30,6 +30,8 @@ class OSDMap;
 class MQuery;
 class PGBackend;
 class PGPeeringEvent;
+class osd_op_params_t;
+
 namespace recovery {
   class Context;
 }
@@ -60,9 +62,12 @@ class PG : public boost::intrusive_ref_counter<
 
   spg_t pgid;
   pg_shard_t pg_whoami;
-  coll_t coll;
   crimson::os::CollectionRef coll_ref;
   ghobject_t pgmeta_oid;
+
+  seastar::timer<seastar::lowres_clock> check_readable_timer;
+  seastar::timer<seastar::lowres_clock> renew_lease_timer;
+
 public:
   PG(spg_t pgid,
      pg_shard_t pg_shard,
@@ -95,11 +100,23 @@ public:
     return peering_state.get_osdmap_epoch();
   }
 
+  eversion_t get_pg_trim_to() const {
+    return peering_state.get_pg_trim_to();
+  }
+
+  eversion_t get_min_last_complete_ondisk() const {
+    return peering_state.get_min_last_complete_ondisk();
+  }
+
+  const pg_info_t& get_info() const {
+    return peering_state.get_info();
+  }
+
   // DoutPrefixProvider
   std::ostream& gen_prefix(std::ostream& out) const final {
     return out << *this;
   }
-  CephContext *get_cct() const final {
+  crimson::common::CephContext *get_cct() const final {
     return shard_services.get_cct();
   }
   unsigned get_subsys() const final {
@@ -119,29 +136,7 @@ public:
     bool dirty_info,
     bool dirty_big_info,
     bool need_write_epoch,
-    ceph::os::Transaction &t) final {
-    std::map<string,bufferlist> km;
-    if (dirty_big_info || dirty_info) {
-      int ret = prepare_info_keymap(
-	shard_services.get_cct(),
-	&km,
-	get_osdmap_epoch(),
-	info,
-	last_written_info,
-	past_intervals,
-	dirty_big_info,
-	need_write_epoch,
-	true,
-	nullptr,
-	this);
-      ceph_assert(ret == 0);
-    }
-    pglog.write_log_and_missing(
-      t, &km, coll, pgmeta_oid,
-      peering_state.get_pool().info.require_rollback());
-    if (!km.empty())
-      t.omap_setkeys(coll, pgmeta_oid, km);
-  }
+    ceph::os::Transaction &t) final;
 
   void on_info_history_change() final {
     // Not needed yet -- mainly for scrub scheduling
@@ -262,6 +257,8 @@ public:
 			    ceph::timespan delay) final;
   void recheck_readable() final;
 
+  unsigned get_target_pg_log_entries() const final;
+
   void on_pool_change() final {
     // Not needed yet
   }
@@ -290,9 +287,7 @@ public:
   void on_removal(ceph::os::Transaction &t) final {
     // TODO
   }
-  void do_delete_work(ceph::os::Transaction &t) final {
-    // TODO
-  }
+  void do_delete_work(ceph::os::Transaction &t) final;
 
   // merge/split not ready
   void clear_ready_to_merge() final {}
@@ -416,7 +411,6 @@ public:
 
   /// initialize created PG
   void init(
-    crimson::os::CollectionRef coll_ref,
     int role,
     const std::vector<int>& up,
     int up_primary,
@@ -487,7 +481,8 @@ private:
     PeeringCtx &rctx);
   seastar::future<Ref<MOSDOpReply>> do_osd_ops(
     Ref<MOSDOp> m,
-    ObjectContextRef obc);
+    ObjectContextRef obc,
+    const OpInfo &op_info);
   seastar::future<Ref<MOSDOpReply>> do_pg_ops(Ref<MOSDOp> m);
   seastar::future<> do_osd_op(
     ObjectState& os,
@@ -496,9 +491,11 @@ private:
   seastar::future<ceph::bufferlist> do_pgnls(ceph::bufferlist& indata,
 					     const std::string& nspace,
 					     uint64_t limit);
-  seastar::future<> submit_transaction(ObjectContextRef&& obc,
+  seastar::future<> submit_transaction(const OpInfo& op_info,
+				       const std::vector<OSDOp>& ops,
+				       ObjectContextRef&& obc,
 				       ceph::os::Transaction&& txn,
-				       const MOSDOp& req);
+				       const osd_op_params_t& oop);
 
 private:
   OSDMapGate osdmap_gate;
@@ -508,6 +505,10 @@ private:
 
 public:
   cached_map_t get_osdmap() { return osdmap; }
+  eversion_t next_version() {
+    return eversion_t(projected_last_update.epoch,
+		      ++projected_last_update.version);
+  }
 
 private:
   std::unique_ptr<PGBackend> backend;

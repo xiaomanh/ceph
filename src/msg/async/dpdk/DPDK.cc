@@ -235,7 +235,6 @@ int DPDKDevice::init_port_start()
     } else if (_dev_info.hash_key_size == 52) {
       _rss_key = default_rsskey_52bytes;
     } else if (_dev_info.hash_key_size != 0) {
-      // WTF?!!
       rte_exit(EXIT_FAILURE,
                "Port %d: We support only 40 or 52 bytes RSS hash keys, %d bytes key requested",
                _port_idx, _dev_info.hash_key_size);
@@ -1095,6 +1094,9 @@ DPDKQueuePair::tx_buf* DPDKQueuePair::tx_buf::from_packet_zc(
   // Update the HEAD buffer with the packet info
   head->pkt_len = p.len();
   head->nb_segs = total_nsegs;
+  // tx_pkt_burst loops until the next pointer is null, so last_seg->next must
+  // be null.
+  last_seg->next = nullptr;
 
   set_cluster_offload_info(p, qp, head);
 
@@ -1206,6 +1208,9 @@ DPDKQueuePair::tx_buf* DPDKQueuePair::tx_buf::from_packet_copy(Packet&& p, DPDKQ
   //
   head->pkt_len = p.len();
   head->nb_segs = nsegs;
+  // tx_pkt_burst loops until the next pointer is null, so last_seg->next must
+  // be null.
+  last_seg->next = nullptr;
 
   copy_packet_to_cluster(p, head);
   set_cluster_offload_info(p, qp, head);

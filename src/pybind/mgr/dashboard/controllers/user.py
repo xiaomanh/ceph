@@ -10,17 +10,26 @@ import cherrypy
 from . import BaseController, ApiController, RESTController, Endpoint
 from .. import mgr
 from ..exceptions import DashboardException, UserAlreadyExists, \
-    UserDoesNotExist, PasswordCheckException, PwdExpirationDateNotValid
+    UserDoesNotExist, PasswordPolicyException, PwdExpirationDateNotValid
 from ..security import Scope
-from ..services.access_control import SYSTEM_ROLES, PasswordCheck
+from ..services.access_control import SYSTEM_ROLES, PasswordPolicy
 from ..services.auth import JwtManager
 
 
-def validate_password_policy(password, username, old_password=None):
-    pw_check = PasswordCheck(password, username, old_password)
+def validate_password_policy(password, username=None, old_password=None):
+    """
+    :param password: The password to validate.
+    :param username: The name of the user (optional).
+    :param old_password: The old password (optional).
+    :return: Returns the password complexity credits.
+    :rtype: int
+    :raises DashboardException: If a password policy fails.
+    """
+    pw_policy = PasswordPolicy(password, username, old_password)
     try:
-        pw_check.check_all()
-    except PasswordCheckException as ex:
+        pw_policy.check_all()
+        return pw_policy.complexity_credits
+    except PasswordPolicyException as ex:
         raise DashboardException(msg=str(ex),
                                  code='password_policy_validation_failed',
                                  component='user')
@@ -28,6 +37,7 @@ def validate_password_policy(password, username, old_password=None):
 
 @ApiController('/user', Scope.USER)
 class User(RESTController):
+
     @staticmethod
     def _user_to_dict(user):
         result = user.to_dict()
@@ -58,7 +68,7 @@ class User(RESTController):
         return User._user_to_dict(user)
 
     def create(self, username=None, password=None, name=None, email=None,
-               roles=None, enabled=True, pwdExpirationDate=None):
+               roles=None, enabled=True, pwdExpirationDate=None, pwdUpdateRequired=True):
         if not username:
             raise DashboardException(msg='Username is required',
                                      code='username_required',
@@ -70,7 +80,8 @@ class User(RESTController):
             validate_password_policy(password, username)
         try:
             user = mgr.ACCESS_CTRL_DB.create_user(username, password, name,
-                                                  email, enabled, pwdExpirationDate)
+                                                  email, enabled, pwdExpirationDate,
+                                                  pwdUpdateRequired)
         except UserAlreadyExists:
             raise DashboardException(msg='Username already exists',
                                      code='username_already_exists',
@@ -99,7 +110,7 @@ class User(RESTController):
         mgr.ACCESS_CTRL_DB.save()
 
     def set(self, username, password=None, name=None, email=None, roles=None,
-            enabled=None, pwdExpirationDate=None):
+            enabled=None, pwdExpirationDate=None, pwdUpdateRequired=False):
         if JwtManager.get_username() == username and enabled is False:
             raise DashboardException(msg='You are not allowed to disable your user',
                                      code='cannot_disable_current_user',
@@ -126,12 +137,45 @@ class User(RESTController):
             user.enabled = enabled
         user.pwd_expiration_date = pwdExpirationDate
         user.set_roles(user_roles)
+        user.pwd_update_required = pwdUpdateRequired
         mgr.ACCESS_CTRL_DB.save()
         return User._user_to_dict(user)
 
 
+@ApiController('/user')
+class UserPasswordPolicy(RESTController):
+
+    @Endpoint('POST')
+    def validate_password(self, password, username=None, old_password=None):
+        """
+        Check if the password meets the password policy.
+        :param password: The password to validate.
+        :param username: The name of the user (optional).
+        :param old_password: The old password (optional).
+        :return: An object with the properties valid, credits and valuation.
+          'credits' contains the password complexity credits and
+          'valuation' the textual summary of the validation.
+        """
+        result = {'valid': False, 'credits': 0, 'valuation': None}
+        try:
+            result['credits'] = validate_password_policy(password, username, old_password)
+            if result['credits'] < 15:
+                result['valuation'] = 'Weak'
+            elif result['credits'] < 20:
+                result['valuation'] = 'OK'
+            elif result['credits'] < 25:
+                result['valuation'] = 'Strong'
+            else:
+                result['valuation'] = 'Very strong'
+            result['valid'] = True
+        except DashboardException as ex:
+            result['valuation'] = str(ex)
+        return result
+
+
 @ApiController('/user/{username}')
 class UserChangePassword(BaseController):
+
     @Endpoint('POST')
     def change_password(self, username, old_password, new_password):
         session_username = JwtManager.get_username()

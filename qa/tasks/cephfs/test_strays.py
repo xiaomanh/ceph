@@ -152,7 +152,7 @@ class TestStrays(CephFSTestCase):
             os.mkdir(os.path.join(mount_path, subdir))
             for i in range(0, file_multiplier):
                 for size in range(0, {size_range}*size_unit, size_unit):
-                    filename = "{{0}}_{{1}}.bin".format(i, size / size_unit)
+                    filename = "{{0}}_{{1}}.bin".format(i, size // size_unit)
                     with open(os.path.join(mount_path, subdir, filename), 'w') as f:
                         f.write(size * 'x')
         """.format(
@@ -194,11 +194,10 @@ class TestStrays(CephFSTestCase):
             num_strays = mdc_stats['num_strays']
             num_strays_purging = pq_stats['pq_executing']
             num_purge_ops = pq_stats['pq_executing_ops']
+            files_high_water = pq_stats['pq_executing_high_water']
+            ops_high_water = pq_stats['pq_executing_ops_high_water']
 
-            self.data_log.append([datetime.datetime.now(), num_strays, num_strays_purging, num_purge_ops])
-
-            files_high_water = max(files_high_water, num_strays_purging)
-            ops_high_water = max(ops_high_water, num_purge_ops)
+            self.data_log.append([datetime.datetime.now(), num_strays, num_strays_purging, num_purge_ops, files_high_water, ops_high_water])
 
             total_strays_created = mdc_stats['strays_created']
             total_strays_purged = pq_stats['pq_executed']
@@ -238,15 +237,22 @@ class TestStrays(CephFSTestCase):
         # insanely fast such that the deletions all pass before we have polled the
         # statistics.
         if throttle_type == self.OPS_THROTTLE:
-            if ops_high_water < mds_max_purge_ops / 2:
+            if ops_high_water < mds_max_purge_ops // 2:
                 raise RuntimeError("Ops in flight high water is unexpectedly low ({0} / {1})".format(
                     ops_high_water, mds_max_purge_ops
                 ))
+            # The MDS may go over mds_max_purge_ops for some items, like a
+            # heavily fragmented directory.  The throttle does not kick in
+            # until *after* we reach or exceed the limit.  This is expected
+            # because we don't want to starve the PQ or never purge a
+            # particularly large file/directory.
+            self.assertLessEqual(ops_high_water, mds_max_purge_ops+64)
         elif throttle_type == self.FILES_THROTTLE:
-            if files_high_water < mds_max_purge_files / 2:
+            if files_high_water < mds_max_purge_files // 2:
                 raise RuntimeError("Files in flight high water is unexpectedly low ({0} / {1})".format(
-                    ops_high_water, mds_max_purge_files
+                    files_high_water, mds_max_purge_files
                 ))
+            self.assertLessEqual(files_high_water, mds_max_purge_files)
 
         # Sanity check all MDC stray stats
         stats = self.fs.mds_asok(['perf', 'dump'])
@@ -367,7 +373,7 @@ class TestStrays(CephFSTestCase):
         self.fs.mds_asok(['flush', 'journal'])
         self.fs.mds_fail_restart()
         self.fs.wait_for_daemons()
-        self.mount_a.mount()
+        self.mount_a.mount_wait()
 
         # Unlink file_a
         self.mount_a.run_shell(["rm", "-f", "dir_1/file_a"])
@@ -622,7 +628,7 @@ class TestStrays(CephFSTestCase):
         rank_0_id = active_mds_names[0]
         rank_1_id = active_mds_names[1]
 
-        self.mount_a.mount()
+        self.mount_a.mount_wait()
 
         self.mount_a.run_shell(["rm", "-f", "dir_1/original"])
         self.mount_a.umount_wait()
@@ -766,7 +772,7 @@ class TestStrays(CephFSTestCase):
         # zero, but there's actually still a stray, so at the very
         # least the StrayManager stats code is slightly off
 
-        self.mount_a.mount()
+        self.mount_a.mount_wait()
 
         # See that the data from the snapshotted revision of the file is still present
         # and correct
@@ -867,8 +873,7 @@ class TestStrays(CephFSTestCase):
         # remount+flush (release client caps)
         self.mount_a.umount_wait()
         self.fs.mds_asok(["flush", "journal"], mds_id)
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
 
         # Create 50% more files than the current fragment limit
         self.mount_a.run_python(dedent("""

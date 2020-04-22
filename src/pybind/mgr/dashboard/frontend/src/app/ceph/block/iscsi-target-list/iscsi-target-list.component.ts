@@ -6,6 +6,7 @@ import { BsModalRef, BsModalService } from 'ngx-bootstrap/modal';
 import { Subscription } from 'rxjs';
 
 import { IscsiService } from '../../../shared/api/iscsi.service';
+import { ListWithDetails } from '../../../shared/classes/list-with-details.class';
 import { CriticalConfirmationModalComponent } from '../../../shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
 import { ActionLabelsI18n } from '../../../shared/constants/app.constants';
 import { TableComponent } from '../../../shared/datatable/table/table.component';
@@ -16,6 +17,7 @@ import { CdTableColumn } from '../../../shared/models/cd-table-column';
 import { CdTableSelection } from '../../../shared/models/cd-table-selection';
 import { FinishedTask } from '../../../shared/models/finished-task';
 import { Permission } from '../../../shared/models/permissions';
+import { Task } from '../../../shared/models/task';
 import { CephReleaseNamePipe } from '../../../shared/pipes/ceph-release-name.pipe';
 import { NotAvailablePipe } from '../../../shared/pipes/not-available.pipe';
 import { AuthStorageService } from '../../../shared/services/auth-storage.service';
@@ -30,7 +32,7 @@ import { IscsiTargetDiscoveryModalComponent } from '../iscsi-target-discovery-mo
   styleUrls: ['./iscsi-target-list.component.scss'],
   providers: [TaskListService]
 })
-export class IscsiTargetListComponent implements OnInit, OnDestroy {
+export class IscsiTargetListComponent extends ListWithDetails implements OnInit, OnDestroy {
   @ViewChild(TableComponent, { static: false })
   table: TableComponent;
 
@@ -45,11 +47,11 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
   status: string;
   summaryDataSubscription: Subscription;
   tableActions: CdTableAction[];
-  targets = [];
+  targets: any[] = [];
   icons = Icons;
 
   builders = {
-    'iscsi/target/create': (metadata) => {
+    'iscsi/target/create': (metadata: object) => {
       return {
         target_iqn: metadata['target_iqn']
       };
@@ -68,6 +70,7 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
     private taskWrapper: TaskWrapperService,
     public actionLabels: ActionLabelsI18n
   ) {
+    super();
     this.permission = this.authStorageService.getPermissions().iscsi;
 
     this.tableActions = [
@@ -165,6 +168,8 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
     if (first && _.isUndefined(first['info'])) {
       return this.i18n('Unavailable gateway(s)');
     }
+
+    return undefined;
   }
 
   getDeleteDisableDesc(): string | undefined {
@@ -178,12 +183,18 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
     if (first && first['info'] && first['info']['num_sessions']) {
       return this.i18n('Target has active sessions');
     }
+
+    return undefined;
   }
 
   prepareResponse(resp: any): any[] {
-    resp.forEach((element) => {
-      element.cdPortals = element.portals.map((portal) => `${portal.host}:${portal.ip}`);
-      element.cdImages = element.disks.map((disk) => `${disk.pool}/${disk.image}`);
+    resp.forEach((element: Record<string, any>) => {
+      element.cdPortals = element.portals.map(
+        (portal: Record<string, any>) => `${portal.host}:${portal.ip}`
+      );
+      element.cdImages = element.disks.map(
+        (disk: Record<string, any>) => `${disk.pool}/${disk.image}`
+      );
     });
 
     return resp;
@@ -193,11 +204,11 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
     this.table.reset(); // Disable loading indicator.
   }
 
-  itemFilter(entry, task) {
+  itemFilter(entry: Record<string, any>, task: Task) {
     return entry.target_iqn === task.metadata['target_iqn'];
   }
 
-  taskFilter(task) {
+  taskFilter(task: Task) {
     return ['iscsi/target/create', 'iscsi/target/edit', 'iscsi/target/delete'].includes(task.name);
   }
 

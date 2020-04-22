@@ -45,6 +45,21 @@
 
  */
 
+using std::list;
+using std::make_pair;
+using std::map;
+using std::pair;
+using std::set;
+using std::string;
+using std::stringstream;
+using std::vector;
+
+using ceph::bufferlist;
+using ceph::bufferptr;
+using ceph::decode;
+using ceph::encode;
+using ceph::JSONFormatter;
+
 const string PREFIX_SUPER = "S"; // field -> value
 const string PREFIX_COLL = "C"; // collection name -> (nothing)
 const string PREFIX_OBJ = "O";  // object name -> onode
@@ -900,7 +915,7 @@ int KStore::_open_collections(int *errors)
       auto p = bl.cbegin();
       try {
         decode(c->cnode, p);
-      } catch (buffer::error& e) {
+      } catch (ceph::buffer::error& e) {
         derr << __func__ << " failed to decode cnode, key:"
              << pretty_binary_string(it->key()) << dendl;
         return -EIO;
@@ -1233,7 +1248,7 @@ int KStore::read(
   if (offset == length && offset == 0)
     length = o->onode.size;
 
-  r = _do_read(o, offset, length, bl, op_flags);
+  r = _do_read(o, offset, length, bl, false, op_flags);
 
  out:
   dout(10) << __func__ << " " << ch->cid << " " << oid
@@ -1247,6 +1262,7 @@ int KStore::_do_read(
     uint64_t offset,
     size_t length,
     bufferlist& bl,
+    bool do_cache,
     uint32_t op_flags)
 {
   int r = 0;
@@ -1274,7 +1290,7 @@ int KStore::_do_read(
   stripe_off = offset % stripe_size;
   while (length > 0) {
     bufferlist stripe;
-    _do_read_stripe(o, offset - stripe_off, &stripe);
+    _do_read_stripe(o, offset - stripe_off, &stripe, do_cache);
     dout(30) << __func__ << " stripe " << offset - stripe_off << " got "
 	     << stripe.length() << dendl;
     unsigned swant = std::min<unsigned>(stripe_size - stripe_off, length);
@@ -1899,7 +1915,7 @@ int KStore::_open_super_meta()
     auto p = bl.cbegin();
     try {
       decode(nid_max, p);
-    } catch (buffer::error& e) {
+    } catch (ceph::buffer::error& e) {
     }
     dout(10) << __func__ << " old nid_max " << nid_max << dendl;
     nid_last = nid_max;
@@ -2593,8 +2609,15 @@ void KStore::_dump_onode(OnodeRef o)
   }
 }
 
-void KStore::_do_read_stripe(OnodeRef o, uint64_t offset, bufferlist *pbl)
+void KStore::_do_read_stripe(OnodeRef o, uint64_t offset, bufferlist *pbl, bool do_cache)
 {
+  if (!do_cache) {
+    string key;
+    get_data_key(o->onode.nid, offset, &key);
+    db->get(PREFIX_DATA, key, pbl);
+    return;
+  }
+ 
   map<uint64_t,bufferlist>::iterator p = o->pending_stripes.find(offset);
   if (p == o->pending_stripes.end()) {
     string key;
@@ -2664,7 +2687,7 @@ int KStore::_do_write(TransContext *txc,
     }
     uint64_t stripe_off = offset - offset_rem;
     bufferlist prev;
-    _do_read_stripe(o, stripe_off, &prev);
+    _do_read_stripe(o, stripe_off, &prev, true);
     dout(20) << __func__ << " read previous stripe " << stripe_off
 	     << ", got " << prev.length() << dendl;
     bufferlist bl;
@@ -2755,7 +2778,7 @@ int KStore::_zero(TransContext *txc,
     while (pos < offset + length) {
       if (stripe_off || end - pos < stripe_size) {
 	bufferlist stripe;
-	_do_read_stripe(o, pos - stripe_off, &stripe);
+	_do_read_stripe(o, pos - stripe_off, &stripe, true);
 	dout(30) << __func__ << " stripe " << pos - stripe_off << " got "
 		 << stripe.length() << dendl;
 	bufferlist bl;
@@ -2812,7 +2835,7 @@ int KStore::_do_truncate(TransContext *txc, OnodeRef o, uint64_t offset)
     while (pos < o->onode.size) {
       if (stripe_off) {
 	bufferlist stripe;
-	_do_read_stripe(o, pos - stripe_off, &stripe);
+	_do_read_stripe(o, pos - stripe_off, &stripe, true);
 	dout(30) << __func__ << " stripe " << pos - stripe_off << " got "
 		 << stripe.length() << dendl;
 	bufferlist t;
@@ -3149,7 +3172,7 @@ int KStore::_clone(TransContext *txc,
   // data
   oldo->flush();
 
-  r = _do_read(oldo, 0, oldo->onode.size, bl, 0);
+  r = _do_read(oldo, 0, oldo->onode.size, bl, true, 0);
   if (r < 0)
     goto out;
 
@@ -3219,7 +3242,7 @@ int KStore::_clone_range(TransContext *txc,
   newo->exists = true;
   _assign_nid(txc, newo);
 
-  r = _do_read(oldo, srcoff, length, bl, 0);
+  r = _do_read(oldo, srcoff, length, bl, true, 0);
   if (r < 0)
     goto out;
 

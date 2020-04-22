@@ -375,7 +375,7 @@ int RGWOrphanSearch::build_buckets_instance_index()
   int ret = store->ctl()->meta.mgr->list_keys_init(section, &handle);
   if (ret < 0) {
     lderr(store->ctx()) << "ERROR: can't get key: " << cpp_strerror(-ret) << dendl;
-    return -ret;
+    return ret;
   }
 
   map<int, list<string> > instances;
@@ -392,7 +392,7 @@ int RGWOrphanSearch::build_buckets_instance_index()
     ret = store->ctl()->meta.mgr->list_keys_next(handle, max, keys, &truncated);
     if (ret < 0) {
       lderr(store->ctx()) << "ERROR: lists_keys_next(): " << cpp_strerror(-ret) << dendl;
-      return -ret;
+      return ret;
     }
 
     for (list<string>::iterator iter = keys.begin(); iter != keys.end(); ++iter) {
@@ -518,7 +518,7 @@ int RGWOrphanSearch::build_linked_oids_for_bucket(const string& bucket_instance_
     return 0;
   }
 
-  if (cur_bucket_info.reshard_status == CLS_RGW_RESHARD_IN_PROGRESS) {
+  if (cur_bucket_info.reshard_status == cls_rgw_reshard_status::IN_PROGRESS) {
     ldout(store->ctx(), 0) << __func__ << ": reshard in progress. Skipping "
                            << orphan_bucket.name << ": "
                            << orphan_bucket.bucket_id << dendl;
@@ -556,7 +556,7 @@ int RGWOrphanSearch::build_linked_oids_for_bucket(const string& bucket_instance_
                                &result, nullptr, &truncated, null_yield);
     if (ret < 0) {
       cerr << "ERROR: store->list_objects(): " << cpp_strerror(-ret) << std::endl;
-      return -ret;
+      return ret;
     }
 
     for (vector<rgw_bucket_dir_entry>::iterator iter = result.begin(); iter != result.end(); ++iter) {

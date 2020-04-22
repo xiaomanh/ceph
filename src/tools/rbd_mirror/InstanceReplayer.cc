@@ -6,6 +6,7 @@
 #include "common/Timer.h"
 #include "common/debug.h"
 #include "common/errno.h"
+#include "common/WorkQueue.h"
 #include "librbd/Utils.h"
 #include "ImageReplayer.h"
 #include "InstanceReplayer.h"
@@ -37,11 +38,13 @@ InstanceReplayer<I>::InstanceReplayer(
     librados::IoCtx &local_io_ctx, const std::string &local_mirror_uuid,
     Threads<I> *threads, ServiceDaemon<I>* service_daemon,
     MirrorStatusUpdater<I>* local_status_updater,
-    journal::CacheManagerHandler *cache_manager_handler)
+    journal::CacheManagerHandler *cache_manager_handler,
+    PoolMetaCache* pool_meta_cache)
   : m_local_io_ctx(local_io_ctx), m_local_mirror_uuid(local_mirror_uuid),
     m_threads(threads), m_service_daemon(service_daemon),
     m_local_status_updater(local_status_updater),
     m_cache_manager_handler(cache_manager_handler),
+    m_pool_meta_cache(pool_meta_cache),
     m_lock(ceph::make_mutex("rbd::mirror::InstanceReplayer " +
         stringify(local_io_ctx.get_id()))) {
 }
@@ -51,6 +54,12 @@ InstanceReplayer<I>::~InstanceReplayer() {
   ceph_assert(m_image_state_check_task == nullptr);
   ceph_assert(m_async_op_tracker.empty());
   ceph_assert(m_image_replayers.empty());
+}
+
+template <typename I>
+bool InstanceReplayer<I>::is_blacklisted() const {
+  std::lock_guard locker{m_lock};
+  return m_blacklisted;
 }
 
 template <typename I>
@@ -103,14 +112,11 @@ void InstanceReplayer<I>::shut_down(Context *on_finish) {
 }
 
 template <typename I>
-void InstanceReplayer<I>::add_peer(
-    std::string peer_uuid, librados::IoCtx io_ctx,
-    MirrorStatusUpdater<I>* remote_status_updater) {
-  dout(10) << peer_uuid << dendl;
+void InstanceReplayer<I>::add_peer(const Peer<I>& peer) {
+  dout(10) << "peer=" << peer << dendl;
 
   std::lock_guard locker{m_lock};
-  auto result = m_peers.insert(
-    Peer(peer_uuid, io_ctx, remote_status_updater)).second;
+  auto result = m_peers.insert(peer).second;
   ceph_assert(result);
 }
 
@@ -150,7 +156,7 @@ void InstanceReplayer<I>::acquire_image(InstanceWatcher<I> *instance_watcher,
     auto image_replayer = ImageReplayer<I>::create(
         m_local_io_ctx, m_local_mirror_uuid, global_image_id,
         m_threads, instance_watcher, m_local_status_updater,
-        m_cache_manager_handler);
+        m_cache_manager_handler, m_pool_meta_cache);
 
     dout(10) << global_image_id << ": creating replayer " << image_replayer
              << dendl;
@@ -161,8 +167,7 @@ void InstanceReplayer<I>::acquire_image(InstanceWatcher<I> *instance_watcher,
     // TODO only a single peer is currently supported
     ceph_assert(m_peers.size() == 1);
     auto peer = *m_peers.begin();
-    image_replayer->add_peer(peer.peer_uuid, peer.io_ctx,
-                             peer.mirror_status_updater);
+    image_replayer->add_peer(peer);
     start_image_replayer(image_replayer);
   } else {
     // A duplicate acquire notification implies (1) connection hiccup or
@@ -170,7 +175,7 @@ void InstanceReplayer<I>::acquire_image(InstanceWatcher<I> *instance_watcher,
     // detect if the image has been deleted while the leader was offline
     auto& image_replayer = it->second;
     image_replayer->set_finished(false);
-    image_replayer->restart();
+    image_replayer->restart(new C_TrackedOp(m_async_op_tracker, nullptr));
   }
 
   m_threads->work_queue->queue(on_finish, 0);
@@ -219,7 +224,7 @@ void InstanceReplayer<I>::remove_peer_image(const std::string &global_image_id,
     // it will eventually detect that the peer image is missing and
     // determine if a delete propagation is required.
     auto image_replayer = it->second;
-    image_replayer->restart();
+    image_replayer->restart(new C_TrackedOp(m_async_op_tracker, nullptr));
   }
   m_threads->work_queue->queue(on_finish, 0);
 }
@@ -247,25 +252,21 @@ void InstanceReplayer<I>::start()
 
   m_manual_stop = false;
 
+  auto cct = static_cast<CephContext *>(m_local_io_ctx.cct());
+  auto gather_ctx = new C_Gather(
+    cct, new C_TrackedOp(m_async_op_tracker, nullptr));
   for (auto &kv : m_image_replayers) {
     auto &image_replayer = kv.second;
-    image_replayer->start(nullptr, true);
+    image_replayer->start(gather_ctx->new_sub(), true);
   }
+
+  gather_ctx->activate();
 }
 
 template <typename I>
 void InstanceReplayer<I>::stop()
 {
-  dout(10) << dendl;
-
-  std::lock_guard locker{m_lock};
-
-  m_manual_stop = true;
-
-  for (auto &kv : m_image_replayers) {
-    auto &image_replayer = kv.second;
-    image_replayer->stop(nullptr, true);
-  }
+  stop(nullptr);
 }
 
 template <typename I>
@@ -274,7 +275,8 @@ void InstanceReplayer<I>::stop(Context *on_finish)
   dout(10) << dendl;
 
   auto cct = static_cast<CephContext *>(m_local_io_ctx.cct());
-  auto gather_ctx = new C_Gather(cct, on_finish);
+  auto gather_ctx = new C_Gather(
+    cct, new C_TrackedOp(m_async_op_tracker, on_finish));
   {
     std::lock_guard locker{m_lock};
 
@@ -300,7 +302,7 @@ void InstanceReplayer<I>::restart()
 
   for (auto &kv : m_image_replayers) {
     auto &image_replayer = kv.second;
-    image_replayer->restart();
+    image_replayer->restart(new C_TrackedOp(m_async_op_tracker, nullptr));
   }
 }
 
@@ -328,6 +330,7 @@ void InstanceReplayer<I>::start_image_replayer(
   } else if (image_replayer->is_blacklisted()) {
     derr << "global_image_id=" << global_image_id << ": blacklisted detected "
          << "during image replay" << dendl;
+    m_blacklisted = true;
     return;
   } else if (image_replayer->is_finished()) {
     // TODO temporary until policy integrated
@@ -341,7 +344,7 @@ void InstanceReplayer<I>::start_image_replayer(
   }
 
   dout(10) << "global_image_id=" << global_image_id << dendl;
-  image_replayer->start(nullptr, false);
+  image_replayer->start(new C_TrackedOp(m_async_op_tracker, nullptr), false);
 }
 
 template <typename I>

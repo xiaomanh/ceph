@@ -25,7 +25,9 @@ set(librgw_common_srcs
   services/svc_bilog_rados.cc
   services/svc_bucket.cc
   services/svc_bucket_sobj.cc
+  services/svc_bucket_sync_sobj.cc
   services/svc_cls.cc
+  services/svc_config_key_rados.cc
   services/svc_datalog_rados.cc
   services/svc_mdlog.cc
   services/svc_meta.cc
@@ -56,6 +58,8 @@ set(librgw_common_srcs
   rgw_arn.cc
   rgw_basic_types.cc
   rgw_bucket.cc
+  rgw_bucket_layout.cc
+  rgw_bucket_sync.cc
   rgw_cache.cc
   rgw_common.cc
   rgw_compression.cc
@@ -81,12 +85,14 @@ set(librgw_common_srcs
   rgw_sync.cc
   rgw_data_sync.cc
   rgw_sync_counters.cc
+  rgw_sync_error_repo.cc
   rgw_sync_module.cc
   rgw_sync_module_aws.cc
   rgw_sync_module_es.cc
   rgw_sync_module_es_rest.cc
   rgw_sync_module_log.cc
   rgw_sync_module_pubsub.cc
+  rgw_sync_policy.cc
   rgw_pubsub_push.cc
   rgw_notify.cc
   rgw_notify_event_type.cc
@@ -106,6 +112,7 @@ set(librgw_common_srcs
   rgw_op.cc
   rgw_otp.cc
   rgw_policy_s3.cc
+  rgw_public_access.cc
   rgw_putobj.cc
   rgw_putobj_processor.cc
   rgw_quota.cc
@@ -142,7 +149,8 @@ set(librgw_common_srcs
   rgw_perf_counters.cc
   rgw_rest_iam.cc
   rgw_object_lock.cc
-  rgw_kms.cc)
+  rgw_kms.cc
+  rgw_url.cc)
 
 if(WITH_RADOSGW_AMQP_ENDPOINT)
   list(APPEND librgw_common_srcs rgw_amqp.cc)
@@ -156,6 +164,11 @@ add_library(rgw_common OBJECT ${librgw_common_srcs})
 target_include_directories(rgw_common SYSTEM PUBLIC "services")
 target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
 target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/fmt/include")
+
+if(WITH_BOOST_CONTEXT)
+  target_include_directories(rgw_common PRIVATE
+    $<TARGET_PROPERTY:spawn,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 
 if(WITH_LTTNG)
   # rgw/rgw_op.cc includes "tracing/rgw_op.h"
@@ -220,7 +233,7 @@ endif()
 target_link_libraries(rgw_a
   PRIVATE
   librados cls_otp_client cls_lock_client cls_rgw_client cls_refcount_client
-  cls_log_client cls_timeindex_client cls_version_client
+  cls_log_client cls_timeindex_client cls_version_client cls_cmpomap_client
   cls_user_client cls_rgw_gc_client ceph-common common_utf8 global
   ${CURL_LIBRARIES}
   ${EXPAT_LIBRARIES}
@@ -233,7 +246,7 @@ if(WITH_CURL_OPENSSL)
 endif()
 
 if(WITH_BOOST_CONTEXT)
-  target_link_libraries(rgw_a PRIVATE Boost::coroutine Boost::context)
+  target_link_libraries(rgw_a PUBLIC spawn)
 endif()
 
 set(rgw_libs rgw_a)
@@ -266,6 +279,10 @@ if(WITH_RADOSGW_BEAST_FRONTEND)
     rgw_dmclock_async_scheduler.cc)
 endif()
 
+add_library(rgw_schedulers STATIC ${rgw_schedulers_srcs})
+target_link_libraries(rgw_schedulers
+  PUBLIC dmclock::dmclock)
+
 add_library(radosgw SHARED ${radosgw_srcs} ${rgw_a_srcs} rgw_main.cc
   $<TARGET_OBJECTS:civetweb_common_objs>)
 
@@ -279,18 +296,16 @@ target_link_libraries(radosgw
   PRIVATE ${rgw_libs} rgw_schedulers
   PUBLIC dmclock::dmclock
 )
-if(WITH_RADOSGW_BEAST_FRONTEND AND WITH_RADOSGW_BEAST_OPENSSL)
-target_link_libraries(radosgw
-  # used by rgw_asio_frontend.cc
-  PRIVATE OpenSSL::SSL)
+if(WITH_RADOSGW_BEAST_FRONTEND)
+  target_link_libraries(rgw_schedulers PUBLIC spawn)
+  if(WITH_RADOSGW_BEAST_OPENSSL)
+    # used by rgw_asio_frontend.cc
+    target_link_libraries(radosgw PRIVATE OpenSSL::SSL)
+  endif()
 endif()
 set_target_properties(radosgw PROPERTIES OUTPUT_NAME radosgw VERSION 2.0.0
   SOVERSION 2)
 install(TARGETS radosgw DESTINATION ${CMAKE_INSTALL_LIBDIR})
-
-add_library(rgw_schedulers STATIC ${rgw_schedulers_srcs})
-target_link_libraries(rgw_schedulers
-  PUBLIC dmclock::dmclock)
 
 add_executable(radosgwd radosgw.cc)
 target_link_libraries(radosgwd radosgw librados
@@ -379,45 +394,6 @@ endif()
 set_target_properties(rgw PROPERTIES OUTPUT_NAME rgw VERSION 2.0.0
   SOVERSION 2)
 install(TARGETS rgw DESTINATION ${CMAKE_INSTALL_LIBDIR})
-
-set(librgw_admin_user_srcs
-  librgw_admin_user.cc
-  rgw_admin_user.cc
-)
-add_library(rgw_admin_user SHARED
-    ${librgw_admin_user_srcs}
-    $<TARGET_OBJECTS:rgw_common>)
-
-add_dependencies(rgw_admin_user civetweb_h)
-
-target_link_libraries(rgw_admin_user PRIVATE
-  librados
-  cls_rgw_client
-  cls_otp_client
-  cls_lock_client
-  cls_refcount_client
-  cls_log_client
-  cls_timeindex_client
-  cls_version_client
-  cls_user_client
-  cls_rgw_gc_client
-  global
-  ${CURL_LIBRARIES}
-  ${EXPAT_LIBRARIES}
-  ${OPENLDAP_LIBRARIES}
-  dmclock::dmclock)
-set_target_properties(rgw_admin_user PROPERTIES OUTPUT_NAME rgw_admin_user VERSION 1.0.0
-  SOVERSION 0)
-install(TARGETS rgw_admin_user DESTINATION ${CMAKE_INSTALL_LIBDIR})
-if(WITH_RADOSGW_AMQP_ENDPOINT)
-  target_link_libraries(rgw_admin_user PRIVATE RabbitMQ::RabbitMQ)
-endif()
-if(WITH_RADOSGW_KAFKA_ENDPOINT)
-  target_link_libraries(rgw_admin_user PRIVATE RDKafka::RDKafka)
-endif()
-if(WITH_BOOST_CONTEXT)
-  target_link_libraries(rgw_admin_user PRIVATE Boost::coroutine Boost::context)
-endif()
 
 if(WITH_TESTS)
   add_executable(ceph_rgw_jsonparser

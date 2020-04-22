@@ -6,7 +6,7 @@ export class ConfigurationPageHelper extends PageHelper {
     index: '/#/configuration'
   };
 
-  async configClear(name) {
+  async configClear(name: string) {
     // Clears out all the values in a config to reset before and after testing
     // Does not work for configs with checkbox only, possible future PR
 
@@ -33,7 +33,8 @@ export class ConfigurationPageHelper extends PageHelper {
     await $('input.form-control.ng-valid').clear();
     await $('input.form-control.ng-valid').sendKeys(name);
 
-    await this.waitClickableAndClick(this.getFirstTableCellWithText(name));
+    // Expand row
+    await this.waitClickableAndClick(this.getExpandCollapseElement(name));
     // Clicks desired config
     await this.waitVisibility(
       $('.table.table-striped.table-bordered'), // Checks for visibility of details tab
@@ -45,7 +46,7 @@ export class ConfigurationPageHelper extends PageHelper {
     }
   }
 
-  async edit(name, ...values: [string, string][]) {
+  async edit(name: string, ...values: [string, string][]) {
     // Clicks the designated config, then inputs the values passed into the edit function.
     // Then checks if the edit is reflected in the config table. Takes in name of config and
     // a list of tuples of values the user wants edited, each tuple having the desired value along
@@ -78,7 +79,7 @@ export class ConfigurationPageHelper extends PageHelper {
 
     await this.waitVisibility(this.getFirstTableCellWithText(name));
     // Checks for visibility of config in table
-    await this.getFirstTableCellWithText(name).click();
+    await this.getExpandCollapseElement(name).click();
     // Clicks config
     for (let i = 0, valtuple; (valtuple = values[i]); i++) {
       // iterates through list of values and

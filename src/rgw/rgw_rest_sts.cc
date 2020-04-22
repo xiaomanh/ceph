@@ -120,7 +120,7 @@ WebTokenEngine::authenticate( const DoutPrefixProvider* dpp,
 
 int RGWREST_STS::verify_permission()
 {
-  STS::STSService _sts(s->cct, store, s->user->user_id, s->auth.identity.get());
+  STS::STSService _sts(s->cct, store, s->user->get_id(), s->auth.identity.get());
   sts = std::move(_sts);
 
   string rArn = s->info.args.get("RoleArn");
@@ -134,7 +134,7 @@ int RGWREST_STS::verify_permission()
   //Parse the policy
   //TODO - This step should be part of Role Creation
   try {
-    const rgw::IAM::Policy p(s->cct, s->user->user_id.tenant, bl);
+    const rgw::IAM::Policy p(s->cct, s->user->get_tenant(), bl);
     //Check if the input role arn is there as one of the Principals in the policy,
     // If yes, then return 0, else -EPERM
     auto p_res = p.eval_principal(s->env, *s->auth.identity);
@@ -168,7 +168,7 @@ int RGWSTSGetSessionToken::verify_permission()
   rgw::Service service = rgw::Service::s3;
   if (!verify_user_permission(this,
                               s,
-                              rgw::ARN(partition, service, "", s->user->user_id.tenant, ""),
+                              rgw::ARN(partition, service, "", s->user->get_tenant(), ""),
                               rgw::IAM::stsGetSessionToken)) {
     return -EACCES;
   }
@@ -183,7 +183,12 @@ int RGWSTSGetSessionToken::get_params()
   tokenCode = s->info.args.get("TokenCode");
 
   if (! duration.empty()) {
-    uint64_t duration_in_secs = stoull(duration);
+    string err;
+    uint64_t duration_in_secs = strict_strtoll(duration.c_str(), 10, &err);
+    if (!err.empty()) {
+      return -EINVAL;
+    }
+
     if (duration_in_secs < STS::GetSessionTokenRequest::getMinDuration() ||
             duration_in_secs > s->cct->_conf->rgw_sts_max_session_duration)
       return -EINVAL;
@@ -198,7 +203,7 @@ void RGWSTSGetSessionToken::execute()
     return;
   }
 
-  STS::STSService sts(s->cct, store, s->user->user_id, s->auth.identity.get());
+  STS::STSService sts(s->cct, store, s->user->get_id(), s->auth.identity.get());
 
   STS::GetSessionTokenRequest req(duration, serialNumber, tokenCode);
   const auto& [ret, creds] = sts.getSessionToken(req);
@@ -234,7 +239,7 @@ int RGWSTSAssumeRoleWithWebIdentity::get_params()
   if (! policy.empty()) {
     bufferlist bl = bufferlist::static_from_string(policy);
     try {
-      const rgw::IAM::Policy p(s->cct, s->user->user_id.tenant, bl);
+      const rgw::IAM::Policy p(s->cct, s->user->get_tenant(), bl);
     }
     catch (rgw::IAM::PolicyParseException& e) {
       ldout(s->cct, 20) << "failed to parse policy: " << e.what() << "policy" << policy << dendl;
@@ -293,7 +298,7 @@ int RGWSTSAssumeRole::get_params()
   if (! policy.empty()) {
     bufferlist bl = bufferlist::static_from_string(policy);
     try {
-      const rgw::IAM::Policy p(s->cct, s->user->user_id.tenant, bl);
+      const rgw::IAM::Policy p(s->cct, s->user->get_tenant(), bl);
     }
     catch (rgw::IAM::PolicyParseException& e) {
       ldout(s->cct, 20) << "failed to parse policy: " << e.what() << "policy" << policy << dendl;
@@ -349,13 +354,8 @@ void RGWHandler_REST_STS::rgw_sts_parse_input()
       for (const auto& t : tokens) {
         auto pos = t.find("=");
         if (pos != string::npos) {
-          const auto key = t.substr(0, pos);
-          if (key == "Action") {
-            s->info.args.append(key, t.substr(pos + 1, t.size() - 1));
-          } else if (key == "RoleArn" || key == "Policy") {
-            const auto value = url_decode(t.substr(pos + 1, t.size() - 1));
-            s->info.args.append(key, value);
-          }
+          s->info.args.append(t.substr(0,pos),
+                              url_decode(t.substr(pos+1, t.size() -1)));
         }
       }
     } 
